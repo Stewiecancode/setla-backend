@@ -1,0 +1,24 @@
+{
+  "name": "setla-backend",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "engines": { "node": ">=22" },
+  "scripts": {
+    "dev": "node --watch --env-file=.env src/server.js",
+    "start": "node src/server.js",
+    "test": "node --test",
+    "check": "node --check src/app.js && node --check src/repository.js && node --check src/server.js"
+  },
+  "dependencies": {
+    "cors": "^2.8.5",
+    "dotenv": "^17.2.3",
+    "express": "^5.1.0",
+    "express-rate-limit": "^8.2.1",
+    "firebase-admin": "^13.6.0",
+    "helmet": "^8.1.0",
+    "multer": "^2.0.2",
+    "zod": "^4.1.12"
+  },
+  "devDependencies": { "supertest": "^7.1.4" }
+}

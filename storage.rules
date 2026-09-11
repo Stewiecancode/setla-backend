@@ -1,0 +1,7 @@
+rules_version = '2';
+service firebase.storage {
+  match /b/{bucket}/o {
+    // Originals stay private. The API streams previews and signs downloads.
+    match /{allPaths=**} { allow read, write: if false; }
+  }
+}
