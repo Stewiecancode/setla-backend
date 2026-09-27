@@ -154,7 +154,7 @@ test('freelancer endpoints reject invalid identities, pagination and document ID
     await authorized(request(app).post('/api/me/conversations/ours/messages'), token).send({ text: 'Hello' }).expect(status)
   }
   for (const path of ['/api/freelancers', '/api/me/conversations', '/api/me/conversations/ours/messages']) {
-    for (const query of ['limit=0', 'limit=49', 'limit=1.5', 'cursor=invalid%2Fid']) {
+    for (const query of ['limit=0', 'limit=49', 'limit=1.5', 'limit=-1', 'limit=abc', 'limit=Infinity', 'limit=', 'limit=1&limit=2', 'cursor=', 'cursor=invalid%2Fid', `cursor=${'a'.repeat(129)}`, 'cursor=a&cursor=b']) {
       await authorized(request(app).get(`${path}?${query}`)).expect(400)
     }
   }
@@ -162,6 +162,67 @@ test('freelancer endpoints reject invalid identities, pagination and document ID
   await authorized(request(app).get('/api/me/conversations/missing/messages')).expect(404)
   await authorized(request(app).post('/api/freelancers/missing/contact'), 'bob').send({ text: 'Hello' }).expect(404)
   assert.equal(docs.size, 3)
+})
+
+test('missing and malformed authentication headers never reach protected freelancer repositories', async () => {
+  const calls = []
+  const methods = ['ownFreelancer', 'saveFreelancer', 'conversations', 'contact', 'messages', 'sendMessage']
+  const overrides = Object.fromEntries(methods.map((name) => [name, async () => { calls.push(name); return {} }]))
+  const { app } = fixture(overrides)
+  const endpoints = [
+    ['get', '/api/me/freelancer'],
+    ['put', '/api/me/freelancer', photographer],
+    ['get', '/api/me/conversations'],
+    ['post', '/api/freelancers/alice/contact', { text: 'Hello' }],
+    ['get', '/api/me/conversations/ours/messages'],
+    ['post', '/api/me/conversations/ours/messages', { text: 'Hello' }],
+  ]
+  for (const header of [null, 'Basic valid', 'Bearer', 'Bearer valid extra']) {
+    for (const [method, path, body] of endpoints) {
+      let req = request(app)[method](path)
+      if (header !== null) req = req.set('Authorization', header)
+      if (body) req = req.send(body)
+      await req.expect(401)
+    }
+  }
+  assert.deepEqual(calls, [])
+})
+
+test('private message cursors do not reveal whether a message exists to non-members', async () => {
+  const { app, docs } = fixture()
+  docs.set('conversations/private', { members: ['carol', 'dave'] })
+  docs.set('conversations/private/messages/secret', { senderId: 'carol', text: 'Private text', createdAt: '2026-09-27T12:00:00.000Z' })
+  const before = structuredClone([...docs])
+  for (const cursor of ['secret', 'missing']) {
+    const result = await authorized(request(app).get(`/api/me/conversations/private/messages?cursor=${cursor}&limit=1`)).expect(403)
+    assert.deepEqual(result.body, { error: 'This conversation is private' })
+  }
+  await authorized(request(app).post('/api/me/conversations/private/messages')).send({ text: 'Intrusion' }).expect(403)
+  assert.deepEqual([...docs], before)
+})
+
+test('freelancer lists accept the maximum page size and return every remaining record once', async () => {
+  const { app, docs } = fixture()
+  docs.set('conversations/ours', { members: ['alice', 'bob'] })
+  const ids = Array.from({ length: 49 }, (_, n) => `record-${String(n).padStart(2, '0')}`)
+  for (const id of ids) {
+    docs.set(`freelancers/${id}`, photographer)
+    docs.set(`conversations/${id}`, { members: ['alice', 'bob'] })
+    docs.set(`conversations/ours/messages/${id}`, { senderId: 'alice', text: id, createdAt: '2026-09-27T12:00:00.000Z' })
+  }
+  const cases = [
+    ['/api/freelancers', ids],
+    ['/api/me/conversations', ['ours', ...ids]],
+    ['/api/me/conversations/ours/messages', [...ids].reverse()],
+  ]
+  for (const [path, expected] of cases) {
+    const first = await authorized(request(app).get(`${path}?limit=48`)).expect(200)
+    assert.deepEqual(first.body.items.map((item) => item.id), expected.slice(0, 48))
+    assert.equal(first.body.nextCursor, expected[47])
+    const next = await authorized(request(app).get(`${path}?limit=48&cursor=${first.body.nextCursor}`)).expect(200)
+    assert.deepEqual(next.body.items.map((item) => item.id), expected.slice(48))
+    assert.equal(next.body.nextCursor, null)
+  }
 })
 
 test('inbox pagination retains membership filtering across pages and ends with a null cursor', async () => {
