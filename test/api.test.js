@@ -41,7 +41,17 @@ function fixture(overrides = {}) {
     }),
   }
   const repository = { ...createRepository(db), list: async () => ({ items: [], nextCursor: null }), ...overrides }
-  const auth = { verifyIdToken: async (token, revoked) => { assert.equal(revoked, true); if (token === 'bad') throw Error('invalid'); return token === 'password' ? { ...identity, firebase: { sign_in_provider: 'password' } } : token === 'bob' ? { ...identity, uid: 'bob' } : identity } }
+  const auth = { verifyIdToken: async (token, revoked) => {
+    assert.equal(revoked, true)
+    const identities = {
+      valid: identity,
+      bob: { ...identity, uid: 'bob' },
+      password: { ...identity, firebase: { sign_in_provider: 'password' } },
+      unverified: { ...identity, email_verified: false },
+    }
+    if (!Object.hasOwn(identities, token)) throw Error('invalid')
+    return identities[token]
+  } }
   const bucket = { file: (path) => ({ save: async (buffer) => files.set(path, buffer), delete: async () => files.delete(path), getSignedUrl: async () => ['https://storage.example.test/signed'] }) }
   return { app: createApp({ repository, auth, bucket, logger: { error() {} } }), files, docs }
 }
@@ -134,8 +144,11 @@ test('freelancer endpoints reject invalid identities, pagination and document ID
   const { app, docs } = fixture()
   docs.set('freelancers/alice', photographer)
   docs.set('conversations/ours', { members: ['alice', 'bob'] })
-  for (const token of ['bad', 'password']) {
+  for (const token of ['bad', 'password', 'unverified']) {
     const status = token === 'bad' ? 401 : 403
+    for (const path of ['/api/me/freelancer', '/api/me/conversations', '/api/me/conversations/ours/messages']) {
+      await authorized(request(app).get(path), token).expect(status)
+    }
     await authorized(request(app).put('/api/me/freelancer'), token).send(photographer).expect(status)
     await authorized(request(app).post('/api/freelancers/alice/contact'), token).send({ text: 'Hello' }).expect(status)
     await authorized(request(app).post('/api/me/conversations/ours/messages'), token).send({ text: 'Hello' }).expect(status)
@@ -149,6 +162,39 @@ test('freelancer endpoints reject invalid identities, pagination and document ID
   await authorized(request(app).get('/api/me/conversations/missing/messages')).expect(404)
   await authorized(request(app).post('/api/freelancers/missing/contact'), 'bob').send({ text: 'Hello' }).expect(404)
   assert.equal(docs.size, 3)
+})
+
+test('inbox pagination retains membership filtering across pages and ends with a null cursor', async () => {
+  const { app, docs } = fixture()
+  for (const id of ['a', 'c', 'e']) docs.set(`conversations/${id}`, { members: ['alice', 'bob'] })
+  for (const id of ['b', 'd', 'f']) docs.set(`conversations/${id}`, { members: ['carol', 'dave'] })
+  const path = '/api/me/conversations'
+  const first = await authorized(request(app).get(`${path}?limit=2`)).expect(200)
+  assert.deepEqual(first.body.items.map((item) => item.id), ['a', 'c'])
+  assert.equal(first.body.nextCursor, 'c')
+  const next = await authorized(request(app).get(`${path}?limit=2&cursor=${first.body.nextCursor}`)).expect(200)
+  assert.deepEqual(next.body.items.map((item) => item.id), ['e'])
+  assert.equal(next.body.nextCursor, null)
+  const exhausted = await authorized(request(app).get(`${path}?limit=2&cursor=e`)).expect(200)
+  assert.deepEqual(exhausted.body, { items: [], nextCursor: null })
+  const exact = await authorized(request(app).get(`${path}?limit=3`)).expect(200)
+  assert.deepEqual(exact.body.items.map((item) => item.id), ['a', 'c', 'e'])
+  assert.equal(exact.body.nextCursor, null)
+})
+
+test('empty freelancer lists return empty pages and default pagination returns 24 items', async () => {
+  const { app, docs } = fixture()
+  await request(app).get('/api/freelancers').expect(200, { items: [], nextCursor: null })
+  await authorized(request(app).get('/api/me/conversations')).expect(200, { items: [], nextCursor: null })
+  docs.set('conversations/ours', { members: ['alice', 'bob'] })
+  await authorized(request(app).get('/api/me/conversations/ours/messages')).expect(200, { items: [], nextCursor: null })
+  for (let n = 0; n < 25; n++) docs.set(`freelancers/photographer-${String(n).padStart(2, '0')}`, photographer)
+  const first = await request(app).get('/api/freelancers').expect(200)
+  assert.equal(first.body.items.length, 24)
+  assert.equal(first.body.nextCursor, 'photographer-23')
+  const next = await request(app).get(`/api/freelancers?cursor=${first.body.nextCursor}`).expect(200)
+  assert.deepEqual(next.body.items.map((item) => item.id), ['photographer-24'])
+  assert.equal(next.body.nextCursor, null)
 })
 
 test('message pagination handles equal timestamps and rejects cursors from another conversation', async () => {
