@@ -7,6 +7,7 @@ import { z, ZodError } from 'zod'
 import { randomUUID } from 'node:crypto'
 import { HttpError } from './errors.js'
 import { categories, publicResource } from './repository.js'
+import { freelancerRoutes } from './freelancers.js'
 
 const idSchema = z.string().regex(/^[a-zA-Z0-9_-]{1,128}$/)
 const metadata = z.object({
@@ -58,6 +59,7 @@ export function createApp({ repository, auth, bucket, origins = ['http://localho
     stream.pipe(res)
   })
   app.use('/api/me', requireAuth)
+  freelancerRoutes(app, repository, requireAuth, pageSchema)
   app.get('/api/me', async (req, res) => res.json(await repository.profile(req.identity)))
   app.get('/api/me/activity', async (req, res) => res.json(await repository.activity(req.identity.uid)))
   app.get('/api/me/saved', async (req, res) => res.json(await repository.saved(req.identity.uid, pageSchema.parse(req.query))))

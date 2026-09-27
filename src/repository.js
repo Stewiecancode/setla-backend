@@ -1,5 +1,6 @@
 import { FieldValue } from 'firebase-admin/firestore'
 import { HttpError } from './errors.js'
+import { createFreelancerRepository } from './freelancers.js'
 
 export const categories = ['All resources', 'Free images', 'PSD templates', 'Posters', 'Flyers', 'African designs']
 const categoryTypes = { 'Free images': 'Image', 'PSD templates': 'PSD', Posters: 'Poster', Flyers: 'Flyer' }
@@ -18,6 +19,7 @@ export function createRepository(db) {
     return record(doc)
   }
   return {
+    ...createFreelancerRepository(db),
     getResource,
     async list({ q = '', category = 'All resources', cursor, limit = 24 }) {
       let query = resources.orderBy('__name__')

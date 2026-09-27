@@ -9,9 +9,30 @@ const png = Buffer.from('89504e470d0a1a0a0000000d4948445200000001000000010806000
 function fixture(overrides = {}) {
   const files = new Map()
   const docs = new Map([['resources/existing', { title: 'Existing', type: 'Image', ownerId: 'alice', likes: 0, filePath: 'original', previewPath: 'preview', fileName: 'image.png' }]])
-  function ref(path) { return { path, collection: (name) => ({ doc: (id) => ref(`${path}/${name}/${id}`) }) } }
+  function snapshot(path) { return { exists: docs.has(path), id: path.split('/').at(-1), data: () => docs.get(path) } }
+  function ref(path) {
+    return { path, collection: (name) => collection(`${path}/${name}`), get: async () => snapshot(path), set: async (value) => docs.set(path, value), create: async (value) => docs.set(path, value) }
+  }
+  function collection(path, filters = [], orders = [], cursor = null, size = Infinity) {
+    return {
+      doc: (id) => ref(`${path}/${id}`),
+      where: (field, operator, value) => collection(path, [...filters, [field, operator, value]], orders, cursor, size),
+      orderBy: (field, direction = 'asc') => collection(path, filters, [...orders, [field, direction]], cursor, size),
+      startAfter: (value) => collection(path, filters, orders, value, size),
+      limit: (value) => collection(path, filters, orders, cursor, value),
+      get: async () => {
+        const value = (doc, field) => field === '__name__' ? doc.id : doc.data()[field]
+        const compare = (a, b) => { for (const [field, direction] of orders) { const result = String(value(a, field)).localeCompare(String(value(b, field))); if (result) return direction === 'desc' ? -result : result } return 0 }
+        let page = [...docs.keys()].filter((key) => key.startsWith(`${path}/`) && key.split('/').length === path.split('/').length + 1).map(snapshot)
+        page = page.filter((doc) => filters.every(([field, operator, expected]) => operator === 'array-contains' ? doc.data()[field].includes(expected) : doc.data()[field] === expected)).sort(compare)
+        if (cursor) page = page.filter((doc) => typeof cursor === 'string' ? doc.id > cursor : compare(doc, cursor) > 0)
+        page = page.slice(0, size)
+        return { docs: page, size: page.length }
+      },
+    }
+  }
   const db = {
-    collection: (name) => ({ doc: (id) => ({ ...ref(`${name}/${id}`), create: async (value) => docs.set(`${name}/${id}`, value), get: async () => ({ exists: docs.has(`${name}/${id}`), id, data: () => docs.get(`${name}/${id}`) }) }) }),
+    collection,
     runTransaction: async (fn) => fn({
       get: async (r) => ({ exists: docs.has(r.path), id: r.path.split('/').at(-1), data: () => docs.get(r.path) }),
       set: (r, value) => docs.set(r.path, value),
@@ -25,6 +46,89 @@ function fixture(overrides = {}) {
   return { app: createApp({ repository, auth, bucket, logger: { error() {} } }), files, docs }
 }
 const authorized = (req, token = 'valid') => req.set('Authorization', `Bearer ${token}`)
+
+const photographer = { displayName: 'Alice Photos', headline: 'Portrait photographer', location: 'Johannesburg', bio: 'Natural portraits for people and their stories.', specialty: 'Portraits', available: true, published: true, instagram: 'https://instagram.com/alice', facebook: '', tiktok: '', website: '' }
+
+test('directory, inbox and message pagination filter correctly without leaking private records', async () => {
+  const { app, docs } = fixture()
+  docs.set('freelancers/alice', photographer)
+  docs.set('freelancers/bob', { ...photographer, published: false })
+  docs.set('freelancers/carol', photographer)
+  const directory = await request(app).get('/api/freelancers?limit=1').expect(200)
+  assert.deepEqual(directory.body.items.map((item) => item.id), ['alice'])
+  assert.equal(directory.body.nextCursor, 'alice')
+  const next = await request(app).get('/api/freelancers?limit=1&cursor=alice').expect(200)
+  assert.deepEqual(next.body.items.map((item) => item.id), ['carol'])
+  assert.equal(next.body.nextCursor, null)
+  docs.set('conversations/ours', { members: ['alice', 'bob'] })
+  docs.set('conversations/theirs', { members: ['carol', 'dave'] })
+  const inbox = await authorized(request(app).get('/api/me/conversations')).expect(200)
+  assert.deepEqual(inbox.body.items.map((item) => item.id), ['ours'])
+  for (let n = 1; n <= 3; n++) docs.set(`conversations/ours/messages/m${n}`, { senderId: 'alice', text: `Message ${n}`, createdAt: `2026-09-27T12:00:0${n}.000Z` })
+  const path = '/api/me/conversations/ours/messages'
+  const messages = await authorized(request(app).get(`${path}?limit=2`)).expect(200)
+  assert.deepEqual(messages.body.items.map((item) => item.id), ['m3', 'm2'])
+  assert.equal(messages.body.nextCursor, 'm2')
+  const older = await authorized(request(app).get(`${path}?limit=2&cursor=m2`), 'bob').expect(200)
+  assert.deepEqual(older.body.items.map((item) => item.id), ['m1'])
+  assert.equal(older.body.nextCursor, null)
+  await authorized(request(app).get(`${path}?cursor=missing`)).expect(400)
+  await request(app).get('/api/me/conversations').expect(401)
+})
+
+test('photographer profiles require authentication, validate URLs, and derive ownership from the token', async () => {
+  const { app, docs } = fixture()
+  await request(app).put('/api/me/freelancer').send(photographer).expect(401)
+  await request(app).get('/api/me/freelancer').expect(401)
+  await authorized(request(app).get('/api/me/freelancer')).expect(200, null)
+  await authorized(request(app).put('/api/me/freelancer')).send({ ...photographer, id: 'bob' }).expect(400)
+  await authorized(request(app).put('/api/me/freelancer')).send({ ...photographer, website: 'javascript:alert(1)' }).expect(400)
+  await authorized(request(app).put('/api/me/freelancer')).send({ ...photographer, bio: 'short' }).expect(400)
+  const result = await authorized(request(app).put('/api/me/freelancer')).send(photographer).expect(200)
+  assert.equal(result.body.id, 'alice')
+  assert.equal(docs.get('freelancers/alice').displayName, 'Alice Photos')
+  await authorized(request(app).put('/api/me/freelancer'), 'bob').send({ ...photographer, displayName: 'Bob' }).expect(200)
+  assert.equal(docs.get('freelancers/alice').displayName, 'Alice Photos')
+  await request(app).get('/api/freelancers/alice').expect(200)
+  await authorized(request(app).put('/api/me/freelancer')).send({ ...photographer, published: false }).expect(200)
+  await request(app).get('/api/freelancers/alice').expect(404)
+})
+
+test('contact and replies persist, reuse a conversation, and enforce privacy', async () => {
+  const { app, docs } = fixture()
+  docs.set('freelancers/alice', photographer)
+  await request(app).post('/api/freelancers/alice/contact').send({ text: 'Hello' }).expect(401)
+  await authorized(request(app).post('/api/freelancers/alice/contact')).send({ text: 'Hello' }).expect(400)
+  await authorized(request(app).post('/api/freelancers/alice/contact'), 'bob').send({ text: '   ' }).expect(400)
+  await authorized(request(app).post('/api/freelancers/alice/contact'), 'bob').send({ text: 'Hi', senderId: 'alice' }).expect(400)
+  const first = await authorized(request(app).post('/api/freelancers/alice/contact'), 'bob').send({ text: 'Can we book a portrait session?' }).expect(201)
+  const second = await authorized(request(app).post('/api/freelancers/alice/contact'), 'bob').send({ text: 'Next Saturday?' }).expect(201)
+  assert.equal(first.body.id, second.body.id)
+  assert.deepEqual(first.body.members, ['alice', 'bob'])
+  const path = `/api/me/conversations/${first.body.id}/messages`
+  await request(app).get(path).expect(401)
+  const reply = await authorized(request(app).post(path)).send({ text: 'Yes, Saturday works.' }).expect(201)
+  assert.equal(reply.body.senderId, 'alice')
+  assert.equal(docs.get(`conversations/${first.body.id}`).lastMessage, 'Yes, Saturday works.')
+  const messages = [...docs.entries()].filter(([key]) => key.startsWith(`conversations/${first.body.id}/messages/`))
+  assert.equal(messages.length, 3)
+  docs.set('conversations/private', { members: ['carol', 'dave'] })
+  await authorized(request(app).get('/api/me/conversations/private/messages')).expect(403)
+  await authorized(request(app).post('/api/me/conversations/private/messages')).send({ text: 'Intrusion' }).expect(403)
+  await authorized(request(app).post('/api/me/conversations/missing/messages')).send({ text: 'Hello' }).expect(404)
+  await authorized(request(app).post(path)).send({ text: 'x'.repeat(3001) }).expect(400)
+})
+
+test('unpublished and unavailable photographers reject new enquiries while existing replies still work', async () => {
+  const { app, docs } = fixture()
+  docs.set('freelancers/alice', photographer)
+  const result = await authorized(request(app).post('/api/freelancers/alice/contact'), 'bob').send({ text: 'Hello' }).expect(201)
+  docs.set('freelancers/alice', { ...photographer, available: false })
+  await authorized(request(app).post('/api/freelancers/alice/contact'), 'bob').send({ text: 'Hello' }).expect(409)
+  docs.set('freelancers/alice', { ...photographer, published: false })
+  await authorized(request(app).post('/api/freelancers/alice/contact'), 'bob').send({ text: 'Hello' }).expect(404)
+  await authorized(request(app).post(`/api/me/conversations/${result.body.id}/messages`)).send({ text: 'Still here' }).expect(201)
+})
 
 test('public browse works, CORS permits the configured website only', async () => {
   const { app } = fixture()
