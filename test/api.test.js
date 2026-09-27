@@ -130,6 +130,57 @@ test('unpublished and unavailable photographers reject new enquiries while exist
   await authorized(request(app).post(`/api/me/conversations/${result.body.id}/messages`)).send({ text: 'Still here' }).expect(201)
 })
 
+test('freelancer endpoints reject invalid identities, pagination and document IDs', async () => {
+  const { app, docs } = fixture()
+  docs.set('freelancers/alice', photographer)
+  docs.set('conversations/ours', { members: ['alice', 'bob'] })
+  for (const token of ['bad', 'password']) {
+    const status = token === 'bad' ? 401 : 403
+    await authorized(request(app).put('/api/me/freelancer'), token).send(photographer).expect(status)
+    await authorized(request(app).post('/api/freelancers/alice/contact'), token).send({ text: 'Hello' }).expect(status)
+    await authorized(request(app).post('/api/me/conversations/ours/messages'), token).send({ text: 'Hello' }).expect(status)
+  }
+  for (const path of ['/api/freelancers', '/api/me/conversations', '/api/me/conversations/ours/messages']) {
+    for (const query of ['limit=0', 'limit=49', 'limit=1.5', 'cursor=invalid%2Fid']) {
+      await authorized(request(app).get(`${path}?${query}`)).expect(400)
+    }
+  }
+  await request(app).get('/api/freelancers/invalid%2Fid').expect(400)
+  await authorized(request(app).get('/api/me/conversations/missing/messages')).expect(404)
+  await authorized(request(app).post('/api/freelancers/missing/contact'), 'bob').send({ text: 'Hello' }).expect(404)
+  assert.equal(docs.size, 3)
+})
+
+test('message pagination handles equal timestamps and rejects cursors from another conversation', async () => {
+  const { app, docs } = fixture()
+  docs.set('conversations/ours', { members: ['alice', 'bob'] })
+  const message = { senderId: 'alice', text: 'Hello', createdAt: '2026-09-27T12:00:00.000Z' }
+  for (const id of ['a', 'b', 'c']) docs.set(`conversations/ours/messages/${id}`, message)
+  docs.set('conversations/theirs/messages/foreign', message)
+  const path = '/api/me/conversations/ours/messages'
+  const first = await authorized(request(app).get(`${path}?limit=2`)).expect(200)
+  assert.deepEqual(first.body.items.map((item) => item.id), ['c', 'b'])
+  const next = await authorized(request(app).get(`${path}?limit=2&cursor=${first.body.nextCursor}`)).expect(200)
+  assert.deepEqual(next.body.items.map((item) => item.id), ['a'])
+  assert.equal(next.body.nextCursor, null)
+  await authorized(request(app).get(`${path}?cursor=foreign`)).expect(400)
+})
+
+test('contact and replies share a rate limit and blocked messages are not persisted', async () => {
+  const { app, docs } = fixture()
+  docs.set('freelancers/alice', photographer)
+  const contact = await authorized(request(app).post('/api/freelancers/alice/contact'), 'bob').send({ text: '  Hello  ' }).expect(201)
+  assert.equal(contact.body.lastMessage, 'Hello')
+  const path = `/api/me/conversations/${contact.body.id}/messages`
+  for (let n = 0; n < 19; n++) {
+    await authorized(request(app).post(path)).send({ text: `Reply ${n}` }).expect(201)
+  }
+  await authorized(request(app).post(path)).send({ text: 'Blocked' }).expect(429)
+  const messages = [...docs.keys()].filter((key) => key.startsWith(`conversations/${contact.body.id}/messages/`))
+  assert.equal(messages.length, 20)
+  assert.equal(docs.get(`conversations/${contact.body.id}`).lastMessage, 'Reply 18')
+})
+
 test('public browse works, CORS permits the configured website only', async () => {
   const { app } = fixture()
   await request(app).get('/health').expect(200)

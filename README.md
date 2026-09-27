@@ -56,6 +56,20 @@ All endpoints return JSON except streamed previews and successful deletes. Prote
 | PUT | `/api/resources/:id/likes` | Google account; `{ "enabled": true }` or false |
 | PUT | `/api/resources/:id/saves` | Google account; `{ "enabled": true }` or false |
 | POST | `/api/resources/:id/download` | Google account; signed URL valid for 5 minutes |
+| GET | `/api/freelancers?limit=24&cursor=` | Public directory of published profiles |
+| GET | `/api/freelancers/:id` | Public published profile; otherwise 404 |
+| GET | `/api/me/freelancer` | Own profile, including drafts; null before creation |
+| PUT | `/api/me/freelancer` | Create or replace own profile |
+| POST | `/api/freelancers/:id/contact` | Google account; start or reuse a conversation with `{ "text": "Hello" }` |
+| GET | `/api/me/conversations?limit=24&cursor=` | Conversations containing the signed-in user |
+| GET | `/api/me/conversations/:id/messages?limit=24&cursor=` | Members only; newest messages first |
+| POST | `/api/me/conversations/:id/messages` | Members only; send `{ "text": "Hello" }` |
+
+Freelancer profile updates require all fields: `displayName` (2–80 characters), `headline` (3–120), `location` (up to 120), `bio` (20–2000), `specialty` (`Portraits`, `Weddings`, `Events`, `Products`, `Fashion`, `Architecture`, or `Other`), `available` and `published` (booleans), and `instagram`, `facebook`, `tiktok`, `website` (HTTP/HTTPS URLs up to 500 characters or empty strings). Text is trimmed. Unknown fields are rejected; the verified user's ID determines profile ownership. Set `published` to false to hide a profile from public browsing.
+
+Contact and reply requests return 201. Messages contain 1–3000 characters after trimming, and sender IDs come from the verified identity. Contact returns the conversation; replies return the new message. Repeated enquiries to the same photographer reuse the conversation and append a message. Self-contact returns 400, missing or unpublished photographers return 404, and unavailable photographers return 409. Existing conversation members can still reply after a profile becomes unavailable or unpublished. Reading or writing another user's conversation returns 403; missing conversations return 404.
+
+Freelancer and conversation lists use document-ID order. Messages use descending creation time with document ID as a tie-breaker. These endpoints return the same paginated envelope described below; message cursors must identify an existing message in that conversation. Contact and reply routes share a limit of 20 requests per minute per IP, in addition to the global API limit.
 
 Upload multipart fields: `title` (3–120 characters), `description` (optional, up to 2000), `type` (`Image`, `PSD`, `Poster`, `Flyer`), `category`, `file`, and optional `preview`. Categories: Photography, Events, Business, People, Architecture, Education, Social Media, African Designs, Other. PNG, JPEG and WebP resources are supported up to 25 MB; PSD resources require an actual PSD file. Previews must be PNG/JPEG/WebP up to 5 MB; a separate preview is required for PSD and images larger than 5 MB. File signatures are checked; this is not malware scanning. HTML, SVG, ZIP, and arbitrary executable uploads are rejected.
 
