@@ -10,7 +10,7 @@
     "dev": "node --watch --env-file=.env src/server.js",
     "start": "node src/server.js",
     "test": "node --test",
-    "check": "node --check src/app.js && node --check src/repository.js && node --check src/freelancers.js && node --check src/server.js"
+    "check": "node --check src/app.js && node --check src/repository.js && node --check src/freelancers.js && node --check src/firebase-credentials.js && node --check src/server.js"
   },
   "dependencies": {
     "cors": "^2.8.5",

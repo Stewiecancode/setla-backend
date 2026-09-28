@@ -79,6 +79,8 @@ Like counts use a transaction with per-user reaction documents, so retrying a re
 
 ## Tests and production
 
+For hosts using environment variables (including Render), set `FIREBASE_CLIENT_EMAIL` and `FIREBASE_PRIVATE_KEY` to the `client_email` and complete `private_key` values from the same Firebase service-account JSON. The private key must include its `-----BEGIN PRIVATE KEY-----` and `-----END PRIVATE KEY-----` lines. Real line breaks and literal `\n` escapes are supported, as are surrounding quotes. Do not use `private_key_id`, the entire JSON document, or a public key as `FIREBASE_PRIVATE_KEY`. A truncated or otherwise invalid key must be replaced with the complete value. Save the corrected environment variables and redeploy. If using Application Default Credentials instead, remove both variables.
+
 ```sh
 npm test
 npm run check
