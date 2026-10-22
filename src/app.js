@@ -27,7 +27,7 @@ function detectedType(buffer) {
   return null
 }
 
-export function createApp({ repository, auth, bucket, origins = ['http://localhost:3000'], trustProxy = 0, logger = console }) {
+export function createApp({ repository, auth, storage, origins = ['http://localhost:3000'], trustProxy = 0, logger = console }) {
   const app = express()
   app.disable('x-powered-by')
   app.set('trust proxy', trustProxy)
@@ -38,9 +38,9 @@ export function createApp({ repository, auth, bucket, origins = ['http://localho
   const requireAuth = async (req, res, next) => {
     const token = req.get('Authorization')?.match(/^Bearer (\S+)$/)?.[1]
     if (!token) throw new HttpError(401, 'Sign in with Google to continue')
-    try { req.identity = await auth.verifyIdToken(token, true) }
+    try { req.identity = await auth.verifyToken(token) }
     catch { throw new HttpError(401, 'Your session expired. Sign in again.') }
-    if (req.identity.firebase?.sign_in_provider !== 'google.com' || !req.identity.email_verified) throw new HttpError(403, 'A verified Google account is required')
+    if (req.identity.provider !== 'google' || !req.identity.email_verified) throw new HttpError(403, 'A verified Google account is required')
     next()
   }
   app.param('id', (req, res, next, value) => { idSchema.parse(value); next() })
@@ -50,13 +50,10 @@ export function createApp({ repository, auth, bucket, origins = ['http://localho
   app.get('/api/resources/:id', async (req, res) => res.json(publicResource(await repository.getResource(req.params.id))))
   app.get('/api/resources/:id/preview', async (req, res) => {
     const resource = await repository.getResource(req.params.id)
-    const file = bucket.file(resource.previewPath)
-    const [metadata] = await file.getMetadata()
-    res.set('Content-Type', metadata.contentType || 'image/jpeg')
+    const preview = await storage.preview(resource.previewPath)
+    res.set('Content-Type', preview.contentType)
     res.set('Cache-Control', 'public, max-age=3600')
-    const stream = file.createReadStream()
-    stream.on('error', (error) => { logger.error('Preview stream failed', error.message); res.destroy() })
-    stream.pipe(res)
+    res.send(preview.buffer)
   })
   app.use('/api/me', requireAuth)
   freelancerRoutes(app, repository, requireAuth, pageSchema)
@@ -81,12 +78,13 @@ export function createApp({ repository, auth, bucket, origins = ['http://localho
       const filePath = `resources/${req.identity.uid}/${id}/original`
       const previewPath = `resources/${req.identity.uid}/${id}/preview`
       try {
-        await bucket.file(filePath).save(file.buffer, { resumable: false, metadata: { contentType: mime, contentDisposition: 'attachment' } })
-        await bucket.file(previewPath).save(preview.buffer, { resumable: false, metadata: { contentType: previewMime } })
+        await storage.upload(filePath, file.buffer, mime)
+        await storage.upload(previewPath, preview.buffer, previewMime)
         const result = await repository.create(id, { ...data, ownerId: req.identity.uid, creator: req.identity.name || 'Setla creator', image: `/api/resources/${id}/preview`, height: 'aspect-[4/5]', accent: 'stone', likes: 0, downloads: 0, filePath, previewPath, fileName: file.originalname.replace(/[^a-zA-Z0-9._-]/g, '_').slice(0, 150), fileSize: file.size, createdAt: new Date().toISOString() })
         res.status(201).json(result)
       } catch (error) {
-        await Promise.allSettled([filePath, previewPath].map((path) => bucket.file(path).delete({ ignoreNotFound: true })))
+        try { await storage.remove([filePath, previewPath]) }
+        catch { logger.error('Storage cleanup required for failed upload', id) }
         throw error
       }
     })
@@ -98,7 +96,7 @@ export function createApp({ repository, auth, bucket, origins = ['http://localho
   }
   app.post('/api/resources/:id/download', requireAuth, async (req, res) => {
     const resource = await repository.getResource(req.params.id)
-    const [url] = await bucket.file(resource.filePath).getSignedUrl({ version: 'v4', action: 'read', expires: Date.now() + 5 * 60000, responseDisposition: `attachment; filename="${resource.fileName}"` })
+    const url = await storage.signedDownload(resource.filePath, resource.fileName)
     await repository.download(req.params.id)
     res.json({ url, expiresIn: 300 })
   })
@@ -109,8 +107,8 @@ export function createApp({ repository, auth, bucket, origins = ['http://localho
   })
   app.delete('/api/resources/:id', requireAuth, async (req, res) => {
     const resource = await repository.remove(req.identity.uid, req.params.id)
-    const cleanup = await Promise.allSettled([resource.filePath, resource.previewPath].map((path) => bucket.file(path).delete({ ignoreNotFound: true })))
-    if (cleanup.some((result) => result.status === 'rejected')) logger.error('Storage cleanup required for deleted resource', req.params.id)
+    try { await storage.remove([resource.filePath, resource.previewPath]) }
+    catch { logger.error('Storage cleanup required for deleted resource', req.params.id) }
     res.status(204).end()
   })
   app.use((req, res) => res.status(404).json({ error: 'Endpoint not found' }))
